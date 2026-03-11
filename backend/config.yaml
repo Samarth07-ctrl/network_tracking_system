@@ -1,0 +1,61 @@
+# Campus Network Traffic Analyzer Configuration
+
+# Database Configuration
+database:
+  host: localhost
+  port: 3306
+  user: campus_monitor
+  password: changeme
+  database: campus_network_monitor
+
+# WiFi Networks Configuration
+wifi_networks:
+  - ssid: "Lab-WiFi"
+    subnet: "192.168.1.0/24"
+    location: "Computer Lab"
+    capture_interface: "\\Device\\NPF_Loopback"
+    bandwidth_capacity_mbps: 100
+  
+  - ssid: "Library-WiFi"
+    subnet: "192.168.2.0/24"
+    location: "Library"
+    capture_interface: "\\Device\\NPF_Loopback"
+    bandwidth_capacity_mbps: 200
+  
+  - ssid: "Hostel-WiFi"
+    subnet: "192.168.3.0/24"
+    location: "Student Hostel"
+    capture_interface: "\\Device\\NPF_Loopback"
+    bandwidth_capacity_mbps: 500
+
+# Intrusion Detection Thresholds
+intrusion_detection:
+  port_scan:
+    port_threshold: 20
+    time_window_seconds: 60
+  
+  ddos:
+    packet_rate_threshold: 1000
+    source_count_threshold: 5
+    time_window_seconds: 30
+  
+  brute_force:
+    attempt_threshold: 10
+    time_window_seconds: 120
+    monitored_ports: [22, 80, 443, 3389]
+  
+  high_bandwidth:
+    threshold_gb: 5
+    time_window_seconds: 3600
+
+# Data Retention
+data_retention:
+  packet_logs_days: 30
+  security_alerts_days: 365
+
+# System Settings
+system:
+  packet_processing_workers: 4
+  max_packets_per_second: 10000
+  api_host: "0.0.0.0"
+  api_port: 8000
