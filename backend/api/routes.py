@@ -4,26 +4,47 @@ FastAPI REST API Routes
 Provides HTTP endpoints for the admin dashboard to access network data.
 
 Endpoints:
-- GET /api/networks - List all WiFi networks
-- GET /api/networks/{id} - Get network details
-- GET /api/networks/{id}/devices - Get connected devices
-- GET /api/networks/{id}/metrics - Get performance metrics
-- GET /api/packets - Get packet logs
-- GET /api/protocols/{network_id} - Get protocol distribution
-- GET /api/bandwidth/{network_id} - Get top bandwidth consumers
-- GET /api/alerts - Get security alerts
-- POST /api/prohibited-websites - Add prohibited domain
-- DELETE /api/prohibited-websites/{id} - Remove prohibited domain
+- GET  /api/networks                    - List all WiFi networks
+- GET  /api/networks/{id}               - Get network details
+- GET  /api/networks/{id}/devices       - Get connected devices
+- GET  /api/networks/{id}/metrics       - Get performance metrics
+- GET  /api/packets                     - Get packet logs
+- GET  /api/protocols/{network_id}      - Get protocol distribution
+- GET  /api/bandwidth/{network_id}      - Get top bandwidth consumers
+- GET  /api/alerts                      - Get security alerts
+- DELETE /api/alerts/clear-all          - Truncate all security alerts (DB reset utility)
+- POST /api/prohibited-websites         - Add prohibited domain
+- DELETE /api/prohibited-websites/{id}  - Remove prohibited domain
+- POST /api/upload-pcap/                - Upload .pcap file for demo/forensic analysis
+- GET  /api/report/generate-pdf         - Generate and download security audit PDF
+- GET  /api/test/upload-pcap            - Test PCAP processing without storing results
 """
 
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from typing import List, Optional
+import io
+import os
+import tempfile
+import threading
+import uuid
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import datetime, timedelta
+from typing import List, Optional
+
+import aiofiles
+from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Query, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
+
 import logging
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Concurrency guard: at most 2 PCAP uploads processed simultaneously.
+# The semaphore is acquired before starting background processing and released
+# inside the background task's finally block.
+# ---------------------------------------------------------------------------
+_upload_semaphore = threading.Semaphore(2)
 
 
 # Pydantic models for request/response validation
@@ -39,15 +60,17 @@ class ProhibitedWebsiteResponse(BaseModel):
     added_at: datetime
 
 
-def create_app(db_manager, traffic_analyzer, ids_engine):
+def create_app(db_manager, traffic_analyzer, ids_engine, pcap_processor=None, pdf_generator=None):
     """
     Create FastAPI application with all routes.
-    
+
     Args:
         db_manager: DatabaseManager instance
         traffic_analyzer: TrafficAnalyzer instance
         ids_engine: IntrusionDetectionEngine instance
-    
+        pcap_processor: PcapProcessor instance (Feature 1 — PCAP Demo Mode)
+        pdf_generator: PdfGenerator instance (Feature 3 — PDF Audit Report)
+
     Returns:
         FastAPI application
     """
@@ -210,6 +233,33 @@ def create_app(db_manager, traffic_analyzer, ids_engine):
         except Exception as e:
             logger.error(f"Error getting alerts: {e}")
             raise HTTPException(status_code=500, detail=str(e))
+
+    # -------------------------------------------------------------------
+    # Database Reset Utility: Clear all security alerts
+    # -------------------------------------------------------------------
+
+    @app.delete("/api/alerts/clear-all")
+    def clear_all_alerts():
+        """
+        Truncate the security_alerts table.
+
+        This is a maintenance / testing utility designed to wipe the
+        thousands of false-positive spam alerts generated when the sniffer
+        was capturing its own management traffic, so that PCAP files can
+        be tested on a clean slate.
+
+        Returns:
+            JSON with the number of deleted rows.
+        """
+        try:
+            deleted_count = db_manager.clear_all_alerts()
+            return {
+                "message": "All security alerts have been cleared",
+                "deleted_count": deleted_count,
+            }
+        except Exception as e:
+            logger.error(f"Error clearing alerts: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
     
     @app.get("/api/prohibited-websites")
     def get_prohibited_websites():
@@ -285,5 +335,156 @@ def create_app(db_manager, traffic_analyzer, ids_engine):
         except Exception as e:
             logger.error(f"Error getting overview stats: {e}")
             raise HTTPException(status_code=500, detail=str(e))
-    
+
+    # -----------------------------------------------------------------------
+    # Feature 1: PCAP File Demo Mode
+    # -----------------------------------------------------------------------
+
+    @app.post("/api/upload-pcap/", status_code=202)
+    async def upload_pcap(
+        background_tasks: BackgroundTasks,
+        file: UploadFile = File(...),
+    ):
+        """
+        Accept a .pcap or .pcapng file and process it through the existing
+        traffic analysis and IDS pipeline in the background.
+
+        - Validates file extension (.pcap / .pcapng) and size (≤ 500 MB).
+        - Limits concurrent uploads to 2 (returns 429 if both slots are busy).
+        - Returns 202 Accepted immediately; processing happens asynchronously.
+        """
+        # --- Validate file extension ---
+        filename = file.filename or ""
+        if not (filename.lower().endswith(".pcap") or filename.lower().endswith(".pcapng")):
+            raise HTTPException(status_code=400, detail="Invalid PCAP format")
+
+        # --- Read file content and validate size (max 500 MB) ---
+        MAX_SIZE = 500 * 1024 * 1024  # 500 MB in bytes
+        content = await file.read()
+        file_size = len(content)
+
+        logger.info(f"PCAP upload attempt: filename={filename}, size={file_size} bytes")
+
+        if file_size > MAX_SIZE:
+            raise HTTPException(status_code=413, detail="File too large")
+
+        # --- Check concurrency limit ---
+        acquired = _upload_semaphore.acquire(blocking=False)
+        if not acquired:
+            raise HTTPException(status_code=429, detail="Too many concurrent uploads")
+
+        # --- Save to a temporary file ---
+        try:
+            tmp_dir = tempfile.mkdtemp()
+            task_id = str(uuid.uuid4())
+            tmp_path = os.path.join(tmp_dir, f"{task_id}.pcap")
+
+            async with aiofiles.open(tmp_path, "wb") as f:
+                await f.write(content)
+
+        except Exception as exc:
+            _upload_semaphore.release()
+            logger.error(f"Failed to save uploaded PCAP file: {exc}")
+            raise HTTPException(status_code=500, detail="Internal server error")
+
+        # --- Enqueue background processing ---
+        def _process_and_release():
+            """Run PCAP processing and always release the semaphore."""
+            try:
+                if pcap_processor is not None:
+                    summary = pcap_processor.process_file(tmp_path)
+                    logger.info(f"PCAP task {task_id} complete: {summary}")
+                else:
+                    logger.warning("pcap_processor not configured — skipping PCAP processing")
+            except Exception as exc:
+                logger.error(f"PCAP processing error for task {task_id}: {exc}")
+            finally:
+                _upload_semaphore.release()
+
+        background_tasks.add_task(_process_and_release)
+
+        return {
+            "task_id": task_id,
+            "message": "PCAP file accepted for processing",
+            "filename": filename,
+            "size_bytes": file_size,
+        }
+
+    # -----------------------------------------------------------------------
+    # Feature 3: Automated Weekly Audit PDF Generator
+    # -----------------------------------------------------------------------
+
+    @app.get("/api/report/generate-pdf")
+    def generate_pdf_report():
+        """
+        Generate and stream a Campus Network Security Audit PDF report.
+
+        Queries the database for:
+        - Top 5 bandwidth consumers (last 24 hours)
+        - Top 5 security alerts (last 24 hours)
+
+        Returns the PDF as an attachment download.
+        """
+        if pdf_generator is None:
+            raise HTTPException(status_code=503, detail="PDF generator not configured")
+
+        logger.info("PDF report generation requested")
+
+        # Run generation with a 10-second timeout to satisfy Requirement 12.5
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(pdf_generator.generate_report)
+            try:
+                pdf_bytes = future.result(timeout=10)
+            except FuturesTimeoutError:
+                logger.error("PDF generation timed out after 10 seconds")
+                raise HTTPException(status_code=504, detail="Report generation timed out")
+            except Exception as exc:
+                logger.error(f"PDF generation failed: {exc}")
+                raise HTTPException(status_code=500, detail=f"PDF generation failed: {exc}")
+
+        today = datetime.now().strftime("%Y-%m-%d")
+        filename = f"campus_security_audit_{today}.pdf"
+
+        logger.info(f"PDF report generated successfully: {filename} ({len(pdf_bytes)} bytes)")
+
+        return StreamingResponse(
+            io.BytesIO(pdf_bytes),
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    # -----------------------------------------------------------------------
+    # Feature 1 (testing): Validate PCAP processing without storing results
+    # -----------------------------------------------------------------------
+
+    @app.get("/api/test/upload-pcap")
+    def test_upload_pcap(file_path: str = Query(..., description="Path to an existing .pcap file")):
+        """
+        Validate PCAP processing without persisting any results to the database.
+        Useful for automated tests and pre-flight checks.
+
+        Args:
+            file_path: Absolute or relative path to an existing .pcap file.
+
+        Returns:
+            Processing summary dict (packets_processed, duration_seconds, errors).
+        """
+        if pcap_processor is None:
+            raise HTTPException(status_code=503, detail="PCAP processor not configured")
+
+        if not os.path.exists(file_path):
+            raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
+
+        try:
+            from modules.pcap_processor import PcapProcessor
+            test_processor = PcapProcessor(
+                traffic_analyzer=traffic_analyzer,
+                test_mode=True,  # keeps the file; does not delete it
+            )
+            summary = test_processor.process_file(file_path)
+            return summary
+        except Exception as exc:
+            logger.error(f"Test PCAP processing failed: {exc}")
+            raise HTTPException(status_code=500, detail=str(exc))
+
     return app

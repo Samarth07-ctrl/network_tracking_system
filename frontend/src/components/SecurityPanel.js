@@ -101,15 +101,46 @@ function SecurityPanel() {
       <div className="card">
         <h2>Security Alerts (Last 24 Hours)</h2>
 
-        <div style={{ marginBottom: '20px' }}>
-          <label>Filter by Severity: </label>
-          <select value={filterSeverity} onChange={(e) => setFilterSeverity(e.target.value)}>
-            <option value="">All</option>
-            <option value="CRITICAL">Critical</option>
-            <option value="HIGH">High</option>
-            <option value="MEDIUM">Medium</option>
-            <option value="LOW">Low</option>
-          </select>
+        <div style={{ marginBottom: '20px', display: 'flex', alignItems: 'center', gap: '20px', flexWrap: 'wrap' }}>
+          <div>
+            <label>Filter by Severity: </label>
+            <select value={filterSeverity} onChange={(e) => setFilterSeverity(e.target.value)}>
+              <option value="">All</option>
+              <option value="CRITICAL">Critical</option>
+              <option value="HIGH">High</option>
+              <option value="MEDIUM">Medium</option>
+              <option value="LOW">Low</option>
+            </select>
+          </div>
+          <button
+            id="clear-dashboard-data-btn"
+            onClick={async () => {
+              if (!window.confirm(
+                'Are you sure you want to delete ALL security alerts?\n\n' +
+                'This will truncate the security_alerts table and cannot be undone.'
+              )) return;
+              try {
+                const res = await apiService.clearAllAlerts();
+                alert(`Cleared ${res.data.deleted_count} alerts from the database.`);
+                fetchAlerts();
+              } catch (err) {
+                console.error('Error clearing alerts:', err);
+                alert('Failed to clear alerts. Check the console for details.');
+              }
+            }}
+            style={{
+              backgroundColor: '#d32f2f',
+              color: 'white',
+              border: 'none',
+              padding: '8px 16px',
+              borderRadius: '6px',
+              cursor: 'pointer',
+              fontWeight: 'bold',
+              fontSize: '13px',
+            }}
+          >
+            🗑️ Clear Dashboard Data
+          </button>
         </div>
 
         {alerts.length === 0 ? (

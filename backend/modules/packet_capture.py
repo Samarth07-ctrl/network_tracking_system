@@ -12,7 +12,7 @@ Networking Concepts Implemented:
 - Asynchronous I/O: Non-blocking packet capture for high throughput
 """
 
-from scapy.all import sniff, IP, TCP, UDP, ICMP, DNS, DNSQR, Ether, ARP
+from scapy.all import sniff, IP, TCP, UDP, ICMP, DNS, DNSQR, Ether, ARP, Raw
 from scapy.error import Scapy_Exception
 from dataclasses import dataclass
 from datetime import datetime
@@ -42,9 +42,12 @@ class PacketLog:
     packet_size: int
     wifi_network_id: int
     dns_query: Optional[str] = None
-    
+    # Raw TCP/UDP payload bytes — populated when a Scapy Raw layer is present.
+    # Used by the credential sniffer for Layer 7 inspection. Never persisted to DB.
+    raw_payload: Optional[bytes] = None
+
     def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for JSON serialization."""
+        """Convert to dictionary for JSON serialization. raw_payload is omitted (in-memory only)."""
         return {
             'timestamp': self.timestamp.isoformat(),
             'source_ip': self.source_ip,
@@ -56,6 +59,7 @@ class PacketLog:
             'packet_size': self.packet_size,
             'wifi_network_id': self.wifi_network_id,
             'dns_query': self.dns_query
+            # raw_payload intentionally excluded — never written to the database
         }
 
 
@@ -143,10 +147,20 @@ class PacketCaptureModule:
             # - prn: Callback function for each packet
             # - store: Don't store packets in memory (we process immediately)
             # - stop_filter: Function to determine when to stop
+            # BPF (Berkeley Packet Filter) to exclude management traffic:
+            # - Port 3000: React frontend dev server
+            # - Port 8000: FastAPI backend server
+            # This prevents the sniffer from capturing its own dashboard traffic
+            # and generating false-positive Port Scan / DDoS alerts.
+            # The BPF filter applies at the kernel level to both TCP and UDP,
+            # so excluded packets never reach userspace (Scapy) at all.
+            bpf_filter = "not port 3000 and not port 8000"
+
             sniff(
                 iface=self.interface,
                 prn=self._packet_handler,
                 store=False,
+                filter=bpf_filter,
                 stop_filter=lambda x: not self.is_running
             )
         except Scapy_Exception as e:
@@ -245,6 +259,13 @@ class PacketCaptureModule:
             elif packet.haslayer(ICMP):
                 protocol = "ICMP"
             
+            # Extract Layer 7 (Application) raw payload for TCP packets.
+            # This is used by the credential sniffer to inspect HTTP/FTP payloads.
+            # The raw bytes are stored in-memory only and never written to the database.
+            raw_payload: Optional[bytes] = None
+            if packet.haslayer(Raw):
+                raw_payload = bytes(packet[Raw].load)
+            
             # Create PacketLog object
             return PacketLog(
                 timestamp=datetime.now(),
@@ -256,7 +277,8 @@ class PacketCaptureModule:
                 dest_port=dest_port,
                 packet_size=packet_size,
                 wifi_network_id=self.wifi_network_id,
-                dns_query=dns_query
+                dns_query=dns_query,
+                raw_payload=raw_payload
             )
         
         except Exception as e:

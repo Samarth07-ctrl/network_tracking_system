@@ -1,12 +1,20 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import apiService from '../services/api';
+import PcapUploader from './PcapUploader';
 
 function Dashboard() {
   const [overviewStats, setOverviewStats] = useState(null);
   const [networks, setNetworks] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+
+  // --- PDF report download state ---
+  /** True while the PDF is being generated / downloaded. */
+  const [reportLoading, setReportLoading] = useState(false);
+  /** Error message shown when PDF generation fails. */
+  const [reportError, setReportError] = useState(null);
+
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -49,6 +57,47 @@ function Dashboard() {
     return 'LOW';
   };
 
+  /**
+   * Trigger a Campus Network Security Audit PDF download.
+   * Calls GET /api/report/generate-pdf, receives the PDF as a Blob,
+   * and programmatically clicks a temporary <a> element to save the file.
+   */
+  const handleDownloadReport = async () => {
+    setReportLoading(true);
+    setReportError(null);
+
+    try {
+      const response = await apiService.downloadSecurityReport();
+
+      // Build a temporary object URL from the PDF blob
+      const blobUrl = window.URL.createObjectURL(
+        new Blob([response.data], { type: 'application/pdf' })
+      );
+
+      // Create a hidden <a> element, click it to trigger the download, then clean up
+      const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+      const link = document.createElement('a');
+      link.href = blobUrl;
+      link.setAttribute('download', `campus_security_audit_${today}.pdf`);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+
+      // Release the object URL to free memory
+      window.URL.revokeObjectURL(blobUrl);
+
+    } catch (err) {
+      console.error('PDF download failed:', err);
+      const detail =
+        err.response?.data?.detail ||
+        err.message ||
+        'Failed to generate report. Please try again.';
+      setReportError(detail);
+    } finally {
+      setReportLoading(false);
+    }
+  };
+
   if (loading) {
     return <div className="loading">Loading dashboard...</div>;
   }
@@ -88,6 +137,77 @@ function Dashboard() {
           </div>
         </div>
       )}
+
+      {/* ------------------------------------------------------------------ */}
+      {/* Feature 3: Download Security Report button                          */}
+      {/* ------------------------------------------------------------------ */}
+      <div className="card" style={{ marginBottom: '1rem' }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.75rem' }}>
+          <div>
+            <h2 style={{ margin: 0 }}>Security Audit Report</h2>
+            <p style={{ margin: '0.25rem 0 0', color: '#6b7280', fontSize: '0.875rem' }}>
+              Generate a PDF with the top 5 bandwidth consumers and top 5 security alerts from the last 24 hours.
+            </p>
+          </div>
+
+          <button
+            onClick={handleDownloadReport}
+            disabled={reportLoading}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '0.5rem',
+              padding: '0.5rem 1.25rem',
+              background: reportLoading ? '#9ca3af' : '#1d4ed8',
+              color: '#fff',
+              border: 'none',
+              borderRadius: '0.375rem',
+              fontSize: '0.875rem',
+              fontWeight: '600',
+              cursor: reportLoading ? 'not-allowed' : 'pointer',
+              transition: 'background 0.2s',
+            }}
+          >
+            {reportLoading ? (
+              <>
+                {/* Spinner */}
+                <svg
+                  style={{ width: '1rem', height: '1rem', animation: 'spin 1s linear infinite' }}
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  aria-hidden="true"
+                >
+                  <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" style={{ opacity: 0.25 }} />
+                  <path fill="currentColor" style={{ opacity: 0.75 }} d="M4 12a8 8 0 018-8v8H4z" />
+                </svg>
+                Generating…
+              </>
+            ) : (
+              <>
+                {/* Download icon */}
+                <svg style={{ width: '1rem', height: '1rem' }} fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                </svg>
+                Download Security Report
+              </>
+            )}
+          </button>
+        </div>
+
+        {/* Error message */}
+        {reportError && (
+          <p style={{ marginTop: '0.5rem', color: '#dc2626', fontSize: '0.875rem' }}>
+            ✗ {reportError}
+          </p>
+        )}
+      </div>
+
+      {/* ------------------------------------------------------------------ */}
+      {/* Feature 1: PCAP Demo Mode uploader                                  */}
+      {/* ------------------------------------------------------------------ */}
+      <div className="card" style={{ marginBottom: '1rem' }}>
+        <PcapUploader />
+      </div>
 
       <div className="card">
         <h2>WiFi Networks</h2>

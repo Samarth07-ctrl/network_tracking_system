@@ -499,6 +499,32 @@ class DatabaseManager:
             cursor.close()
             conn.close()
     
+    def clear_all_alerts(self) -> int:
+        """
+        Truncate the security_alerts table, removing all rows.
+
+        Uses TRUNCATE for performance (faster than DELETE, resets AUTO_INCREMENT).
+        This is intended as a maintenance / testing utility to clear out
+        false-positive spam so PCAP files can be tested on a clean slate.
+
+        Returns:
+            Number of rows that existed before truncation.
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            # Get current row count for the response message
+            cursor.execute("SELECT COUNT(*) FROM security_alerts")
+            row_count = cursor.fetchone()[0]
+
+            cursor.execute("TRUNCATE TABLE security_alerts")
+            conn.commit()
+            logger.info(f"Cleared all {row_count} security alerts from database")
+            return row_count
+        finally:
+            cursor.close()
+            conn.close()
+
     def close(self):
         """Close all connections in the pool."""
         if self.pool:

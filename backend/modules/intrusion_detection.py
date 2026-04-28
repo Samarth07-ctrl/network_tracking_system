@@ -18,6 +18,7 @@ Networking Concepts Implemented:
 from typing import Dict, List, Set, Optional
 from collections import defaultdict
 from datetime import datetime, timedelta
+import re
 import threading
 import logging
 from .packet_capture import PacketLog
@@ -142,6 +143,10 @@ class IntrusionDetectionEngine:
             if packet_log.protocol == "DNS" and packet_log.dns_query:
                 self._check_prohibited_website(packet_log)
             
+            # Check for clear-text credential transmission on HTTP (80) and FTP (21)
+            if packet_log.dest_port in (80, 21) and packet_log.raw_payload is not None:
+                self._check_cleartext_credentials(packet_log)
+            
             # Track bandwidth for high usage detection
             self._track_bandwidth(packet_log)
         
@@ -174,7 +179,7 @@ class IntrusionDetectionEngine:
             # Port scan detected!
             self._generate_alert(
                 alert_type="PORT_SCAN",
-                severity="HIGH",
+                severity="CRITICAL",
                 source_ip=packet_log.source_ip,
                 source_mac=packet_log.source_mac,
                 target_ip=packet_log.dest_ip,
@@ -369,6 +374,115 @@ class IntrusionDetectionEngine:
                 tracking['bytes'] = 0
                 tracking['start_time'] = packet_log.timestamp
     
+    def _check_cleartext_credentials(self, packet_log: PacketLog):
+        """
+        Inspect TCP payload on HTTP (port 80) and FTP (port 21) for clear-text
+        credential patterns using Layer 7 (Application layer) inspection.
+
+        HTTP detection: regex search for 'user=', 'login=', 'username=', 'password='
+        FTP detection: literal prefix check for 'USER ' and 'PASS ' commands
+
+        IMPORTANT: Only the parameter name / command keyword is stored in the alert
+        metadata — the actual credential value is NEVER saved anywhere.
+
+        Args:
+            packet_log: PacketLog with raw_payload populated (guaranteed non-None by caller)
+        """
+        try:
+            # Decode the raw TCP payload as UTF-8.
+            # If the payload contains non-UTF-8 bytes (binary data), skip silently.
+            try:
+                payload_text = packet_log.raw_payload.decode('utf-8', errors='strict')
+            except UnicodeDecodeError:
+                logger.debug(
+                    f"Non-UTF-8 payload from {packet_log.source_ip} on port "
+                    f"{packet_log.dest_port} — skipping credential check"
+                )
+                return
+
+            if packet_log.dest_port == 80:
+                # --- HTTP credential detection ---
+                # Regex matches any of the four common form-field names followed by '='.
+                # We capture only the parameter name (group 1), never the value after '='.
+                # Pattern breakdown:
+                #   (?i)          — case-insensitive (handles Password=, PASSWORD=, etc.)
+                #   (user|login|username|password)  — the parameter name to capture
+                #   =             — the assignment operator that confirms it's a key=value pair
+                http_pattern = re.compile(
+                    r'(?i)(user|login|username|password)=',
+                    re.IGNORECASE
+                )
+                match = http_pattern.search(payload_text)
+                if match:
+                    # Extract only the matched keyword, not the value that follows '='
+                    matched_param = match.group(1).lower()
+                    logger.warning(
+                        f"Clear-text credential detected: '{matched_param}=' in HTTP traffic "
+                        f"from {packet_log.source_ip}"
+                    )
+                    self._generate_alert(
+                        alert_type="CLEARTEXT_CREDENTIAL",
+                        severity="CRITICAL",
+                        source_ip=packet_log.source_ip,
+                        source_mac=packet_log.source_mac,
+                        target_ip=packet_log.dest_ip,
+                        metadata={
+                            # Protocol identifier for the alert display
+                            "protocol": "HTTP",
+                            # Only the parameter name — value is intentionally omitted
+                            "matched_parameter": matched_param,
+                            "description": (
+                                f"Clear-text credential transmission detected on "
+                                f"{packet_log.source_ip} via HTTP"
+                            )
+                        },
+                        wifi_network_id=packet_log.wifi_network_id
+                    )
+
+            elif packet_log.dest_port == 21:
+                # --- FTP credential detection ---
+                # FTP authentication uses plain-text commands:
+                #   'USER <username>\r\n'  — sent to identify the user
+                #   'PASS <password>\r\n'  — sent to authenticate
+                # We check only the command keyword prefix, never the argument value.
+                ftp_command = None
+                upper_payload = payload_text.upper()
+
+                if upper_payload.startswith("USER "):
+                    # FTP USER command — username is being transmitted in clear text
+                    ftp_command = "USER"
+                elif upper_payload.startswith("PASS "):
+                    # FTP PASS command — password is being transmitted in clear text
+                    ftp_command = "PASS"
+
+                if ftp_command:
+                    logger.warning(
+                        f"Clear-text FTP credential detected: '{ftp_command}' command "
+                        f"from {packet_log.source_ip}"
+                    )
+                    self._generate_alert(
+                        alert_type="CLEARTEXT_CREDENTIAL",
+                        severity="CRITICAL",
+                        source_ip=packet_log.source_ip,
+                        source_mac=packet_log.source_mac,
+                        target_ip=packet_log.dest_ip,
+                        metadata={
+                            # Protocol identifier for the alert display
+                            "protocol": "FTP",
+                            # Only the command keyword — the argument value is intentionally omitted
+                            "matched_parameter": ftp_command,
+                            "description": (
+                                f"Clear-text credential transmission detected on "
+                                f"{packet_log.source_ip} via FTP"
+                            )
+                        },
+                        wifi_network_id=packet_log.wifi_network_id
+                    )
+
+        except Exception as e:
+            # Catch-all: credential check must never crash the main analyze_packet() flow
+            logger.error(f"Error in cleartext credential check for {packet_log.source_ip}: {e}")
+
     def _generate_alert(self, alert_type: str, severity: str,
                        source_ip: Optional[str], source_mac: Optional[str],
                        target_ip: Optional[str], metadata: Dict,

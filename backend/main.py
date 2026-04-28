@@ -29,6 +29,8 @@ from modules.database import DatabaseManager
 from modules.packet_capture import PacketCaptureManager
 from modules.traffic_analyzer import TrafficAnalyzer
 from modules.intrusion_detection import IntrusionDetectionEngine
+from modules.pcap_processor import PcapProcessor
+from modules.pdf_generator import PdfGenerator
 from api.routes import create_app
 
 # Configure logging
@@ -63,6 +65,8 @@ class CampusNetworkMonitor:
         self.capture_manager = None
         self.traffic_analyzer = None
         self.ids_engine = None
+        self.pcap_processor = None
+        self.pdf_generator = None
         self.app = None
     
     def initialize(self):
@@ -121,7 +125,15 @@ class CampusNetworkMonitor:
         
         # Create FastAPI application
         logger.info("Creating API server...")
-        self.app = create_app(self.db_manager, self.traffic_analyzer, self.ids_engine)
+        self.pcap_processor = PcapProcessor(self.traffic_analyzer)
+        self.pdf_generator = PdfGenerator(self.db_manager)
+        self.app = create_app(
+            self.db_manager,
+            self.traffic_analyzer,
+            self.ids_engine,
+            pcap_processor=self.pcap_processor,
+            pdf_generator=self.pdf_generator,
+        )
         
         logger.info("=" * 60)
         logger.info("System initialized successfully!")

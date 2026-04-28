@@ -42,7 +42,7 @@ intrusion_detection:
   brute_force:
     attempt_threshold: 10
     time_window_seconds: 120
-    monitored_ports: [22, 80, 443, 3389]
+    monitored_ports: [22, 3389]
   
   high_bandwidth:
     threshold_gb: 5

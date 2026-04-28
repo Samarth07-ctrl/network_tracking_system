@@ -49,6 +49,48 @@ export const apiService = {
   
   // Overview stats
   getOverviewStats: () => api.get('/api/stats/overview'),
+
+  // Database reset utility — wipe all security alerts
+  clearAllAlerts: () => api.delete('/api/alerts/clear-all'),
+
+  /**
+   * Upload a .pcap file for forensic analysis / demo mode.
+   *
+   * @param {File} file - The .pcap or .pcapng File object selected by the user.
+   * @param {function(number): void} [onProgress] - Optional callback receiving
+   *   upload progress as a percentage (0–100).
+   * @returns {Promise} Axios promise resolving to { task_id, message, filename, size_bytes }
+   */
+  uploadPcap: (file, onProgress) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    return api.post('/api/upload-pcap/', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      // Override the default 10-second timeout for potentially large files
+      timeout: 120000,
+      onUploadProgress: (progressEvent) => {
+        if (onProgress && progressEvent.total) {
+          const percent = Math.round((progressEvent.loaded * 100) / progressEvent.total);
+          onProgress(percent);
+        }
+      },
+    });
+  },
+
+  /**
+   * Download the Campus Network Security Audit PDF report.
+   *
+   * The response is returned as a Blob so the caller can create an object URL
+   * and trigger a browser download.
+   *
+   * @returns {Promise} Axios promise resolving to a Blob containing the PDF bytes.
+   */
+  downloadSecurityReport: () =>
+    api.get('/api/report/generate-pdf', {
+      responseType: 'blob',
+      // PDF generation can take up to 10 s on the server; allow 30 s total
+      timeout: 30000,
+    }),
 };
 
 export default apiService;

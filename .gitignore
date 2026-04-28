@@ -58,3 +58,11 @@ Thumbs.db
 # Project specific
 backend/campus_monitor.log
 backend/*.pcap
+
+# Environment variables
+.env
+backend/.env
+
+# Kiro
+.kiro/
+

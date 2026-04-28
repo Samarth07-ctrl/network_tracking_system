@@ -6,3 +6,12 @@ mysql-connector-python>=8.2.0
 pydantic>=2.5.0
 python-dotenv>=1.0.0
 pyyaml>=6.0.2
+
+# Feature: PCAP Demo Mode — multipart file upload support
+python-multipart>=0.0.9
+
+# Feature: PCAP Demo Mode — async file I/O for saving uploaded files
+aiofiles>=23.2.1
+
+# Feature: Automated Weekly Audit PDF Generator
+fpdf2>=2.7.9
